@@ -101,8 +101,8 @@ Examples:
     
     parser.add_argument(
         '--base_dir',
-        default='/home/radodhia/ssdprivate/NOAAWhalesV2/DataInput_New',
-        help='Base directory containing species folders (default: /home/radodhia/ssdprivate/NOAAWhalesV2/DataInput_New)'
+    default='/home/radodhia/ssdprivate/NOAAWhalesV3/DataInput_New',
+    help='Base directory containing species folders (default: /home/radodhia/ssdprivate/NOAAWhalesV3/DataInput_New)'
     )
     
     parser.add_argument(

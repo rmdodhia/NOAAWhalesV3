@@ -66,7 +66,7 @@ class FailureAnalyzer:
     Analyzes test results and creates PDF reports of misclassified spectrograms.
     """
     
-    def __init__(self, base_data_dir='/home/radodhia/ssdprivate/NOAAWhalesV2/DataInput_New'):
+    def __init__(self, base_data_dir='/home/radodhia/ssdprivate/NOAAWhalesV3/DataInput_New'):
         self.base_data_dir = base_data_dir
         
     def load_test_results(self, csv_path, confidence_cutoff=None, confidence_measure='confidence_percent', sort_order='desc', species_filter=None):
@@ -515,8 +515,8 @@ Examples:
     
     parser.add_argument(
         '--base_dir',
-        default='/home/radodhia/ssdprivate/NOAAWhalesV2/DataInput_New',
-        help='Base directory for spectrogram data (default: /home/radodhia/ssdprivate/NOAAWhalesV2/DataInput_New)'
+    default='/home/radodhia/ssdprivate/NOAAWhalesV3/DataInput_New',
+    help='Base directory for spectrogram data (default: /home/radodhia/ssdprivate/NOAAWhalesV3/DataInput_New)'
     )
     
     args = parser.parse_args()

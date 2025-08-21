@@ -1,3 +1,5 @@
+# make_spectrograms_and_labels.py
+
 # -----------------------------------------------------------------------------
 # Script: make_spectrograms_and_labels_humpback_orca.py
 # -----------------------------------------------------------------------------
@@ -27,14 +29,13 @@
 #   - .pt files: Spectrogram segments for each audio file
 #   - CSV files: Labels and metadata for each segment
 # -----------------------------------------------------------------------------
-# make_spectrograms_and_labels.py
 
 import os
 import glob
 import math
 import time
 import torch
-import torchaudio
+import soundfile as sf
 import logging
 import datetime
 import pytz
@@ -44,14 +45,14 @@ from torchaudio.transforms import MelSpectrogram
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────
 SDUR      = 2.0        # segment duration (s)
-OVERLAP   = 0.4        # succeeding segment overlap (s)
+OVERLAP   = 0.4        # overlap    (s)
 DEVICE    = 'cuda' if torch.cuda.is_available() else 'cpu'
-# MEL spectrogram parameters
-N_MELS    = 128        # number of mel bins for mel spectrogram
-N_FFT     = 2048       # FFT window size
-HOP_LEN   = 512        # hop length (samples)
-# Minimum overlap (seconds) with annotation required for label=1
 MIN_OVERLAP_FOR_POSITIVE = 0.3
+
+# MEL spectrogram parameters
+N_FFT     = 2048       # FFT window size
+HOP_LEN   = 512        # hop length
+N_MELS    = 128        # number of mel bands
 
 # ─── LOGGING ───────────────────────────────────────────────────────────────
 os.makedirs('Logs', exist_ok=True)
@@ -73,7 +74,7 @@ def resolve_audio_folder(base):
     raise FileNotFoundError(f"No .wav under {base}")
 
 # ─── LOCATION NAME MAPPING ────────────────────────────────────────────────
-# Not needed anymore; directories are already canonical under DataInput_New
+# No longer needed - DataInput_New directories are organized with canonical names
 
 # ─── CORE WORK ─────────────────────────────────────────────────────────────
 
@@ -85,14 +86,15 @@ def process_wav_file(
     overlap=0.4,
     n_pad=5.0,
     k_null=3,
-    min_overlap_for_positive=MIN_OVERLAP_FOR_POSITIVE,
+    min_overlap_for_positive=0.3,
     large_file_samples=15_000_000,  # ~600s at 24kHz
     chunk_duration_s=600           # 10 minutes per chunk
 ):
     import math
-    wav_info = torchaudio.info(wav_path)
-    num_samples = wav_info.num_frames
-    sr = wav_info.sample_rate
+    # Use libsndfile for robust metadata
+    with sf.SoundFile(wav_path) as sfh:
+        sr = sfh.samplerate
+        num_samples = sfh.frames
     file_duration = num_samples / sr
     audiofile = os.path.basename(wav_path)
     location = os.path.basename(os.path.dirname(wav_path))
@@ -125,7 +127,7 @@ def process_wav_file(
             for _, row in sub.iterrows():
                 start = row["startseconds"]
                 end = start + row["durationseconds"]
-                ann_file = row.get("annotationfile", row.get("source_annotation_file", ""))
+                ann_file = row.get("annotationfile", "")
                 annotation_records.append((start, end, ann_file))
                 # Use exact interval without padding
                 padded_intervals.append((start, end))
@@ -155,7 +157,7 @@ def process_wav_file(
                 return any(max(0, min(b, t1) - max(a, t0)) >= min_overlap for a, b in intervals)
 
             try:
-                # --- Compute MEL spectrogram once ---
+                # --- Compute spectrogram once ---
                 mel_transform = MelSpectrogram(
                     sample_rate=sr,
                     n_fft=N_FFT,
@@ -173,6 +175,8 @@ def process_wav_file(
                 return
             seg_frames = math.ceil((segment_duration * sr) / HOP_LEN)
             step_frames = math.ceil(((segment_duration - overlap) * sr) / HOP_LEN)
+
+            # --- Check if audio is too short for segment extraction ---
 
             # --- Check if audio is too short for segment extraction ---
             if db.shape[1] < seg_frames:
@@ -196,7 +200,7 @@ def process_wav_file(
                 abs_seg_end = seg_end + chunk_start_s
                 all_indices.append((i, abs_seg_start, abs_seg_end))
 
-            # --- For each segment across the whole chunk, label as 1 if overlaps any annotation, else 0, and record details ---
+            # --- For each segment across the whole chunk, label as 1 if overlaps any annotation, else 0, and record annotationfile ---
             for i, abs_seg_start, abs_seg_end in all_indices:
                 arr = slices[i].numpy()
                 is_pos = overlaps_any_anno(abs_seg_start, abs_seg_end, annotation_intervals, min_overlap_for_positive)
@@ -206,18 +210,17 @@ def process_wav_file(
                 annotation_ends = []
                 total_overlap = 0.0
                 for a, b, af in annotation_records:
-                    ov = max(0, min(b, abs_seg_end) - max(a, abs_seg_start))
-                    if ov >= min_overlap_for_positive:
+                    ann_ov = max(0, min(b, abs_seg_end) - max(a, abs_seg_start))
+                    if ann_ov >= min_overlap_for_positive:
                         overlapping_ann.append(af)
                         annotation_starts.append(a)
                         annotation_ends.append(b)
-                        total_overlap += ov
+                        total_overlap += ann_ov
                 ann_str = ";".join(overlapping_ann) if overlapping_ann else ""
                 annotation_start = min(annotation_starts) if annotation_starts else ''
                 annotation_end = max(annotation_ends) if annotation_ends else ''
-                overlap_ms = int(round(total_overlap * 1000))
-                seg_len = (abs_seg_end - abs_seg_start) if (abs_seg_end - abs_seg_start) > 0 else 1.0
-                overlap_pct = 100.0 * (total_overlap / seg_len)
+                overlap_seconds = total_overlap
+                overlap_fraction = overlap_seconds / (abs_seg_end - abs_seg_start) if (abs_seg_end - abs_seg_start) > 0 else 0.0
                 fname = f"{audiofile.replace('.wav','')}_{int(abs_seg_start*1000)}_{int(abs_seg_end*1000)}.pt"
                 fpath = os.path.join(dst_folder, fname)
                 try:
@@ -225,7 +228,7 @@ def process_wav_file(
                 except Exception as e:
                     logging.error(f"Failed to save tensor for {audiofile} segment {abs_seg_start:.2f}-{abs_seg_end:.2f}s: {e}")
                     continue
-                results.append((fname, label, audiofile, ann_str, overlap_ms, overlap_pct, annotation_start, annotation_end))
+                results.append((fname, label, audiofile, ann_str, overlap_seconds, overlap_fraction, annotation_start, annotation_end))
         except Exception as e:
             logging.error(f"process_chunk failed for {audiofile} chunk {chunk_index} ({chunk_start_s:.2f}s): {e}")
             return
@@ -241,13 +244,27 @@ def process_wav_file(
             chunk_len = end_sample - start_sample
             if chunk_len <= 0:
                 continue
-            wave, _ = torchaudio.load(wav_path, frame_offset=start_sample, num_frames=chunk_len)
+            try:
+                with sf.SoundFile(wav_path) as sfh:
+                    sfh.seek(start_sample)
+                    data = sfh.read(frames=chunk_len, dtype='float32', always_2d=True)
+                arr = torch.from_numpy(data.T.copy())  # (channels, frames)
+                wave = arr
+            except Exception as e:
+                logging.error(f"libsndfile read failed for {audiofile} (chunk {chunk_idx}): {e}")
+                continue
             process_chunk(wave[0], chunk_start_s=start_sample / sr, ann_df=ann_df, sr=sr, chunk_index=chunk_idx, n_chunks=n_chunks)
     else:
         n_chunks = 1
-        wave, _ = torchaudio.load(wav_path)
+        try:
+            data, _ = sf.read(wav_path, dtype='float32', always_2d=True)
+            arr = torch.from_numpy(data.T.copy())  # (channels, frames)
+            wave = arr
+        except Exception as e:
+            logging.error(f"libsndfile full read failed for {audiofile}: {e}")
+            return results
         process_chunk(wave[0], chunk_start_s=0, ann_df=ann_df, sr=sr, chunk_index=0, n_chunks=n_chunks)
-    # Robust to tuple length
+    # Robust to tuple length changes: (_, label, *rest)
     n_pos = sum(1 for _, label, *rest in results if label == 1)
     n_neg = sum(1 for _, label, *rest in results if label == 0)
     logging.info(f"Processed file {audiofile}: {n_pos} positive, {n_neg} negative images generated")
@@ -256,8 +273,7 @@ def process_wav_file(
 
 def generate_spectrograms_and_labels(
     species, locations, ann_csv=None, proportion=1,
-    segment_duration=2.0, overlap=0.4, n_pad=5.0, k_null=3, min_overlap_for_positive=MIN_OVERLAP_FOR_POSITIVE
-):
+    segment_duration=2.0, overlap=0.4, n_pad=5.0, k_null=3, min_overlap_for_positive=0.3):
     ann_csv = ann_csv or f"./DataInput_New/{species}/Processed/{species}_annotations_processed.csv"
     logging.info(f"Loading annotations from {ann_csv}")
     ann_df = pd.read_csv(ann_csv, low_memory=False)
@@ -284,20 +300,24 @@ def generate_spectrograms_and_labels(
     if 'audiofile_path' in ann_df.columns:
         ann_df['audiofile_path'] = ann_df['audiofile_path'].apply(os.path.basename)
         logging.info(f"First 5 audiofile entries after basename extraction: {ann_df['audiofile_path'].head().tolist()}")
-    elif 'audiofile' in ann_df.columns:
-        ann_df.rename(columns={'audiofile': 'audiofile_path'}, inplace=True)
-        ann_df['audiofile_path'] = ann_df['audiofile_path'].apply(os.path.basename)
-        logging.info(f"First 5 audiofile entries after basename extraction: {ann_df['audiofile_path'].head().tolist()}")
     else:
-        logging.warning("'audiofile_path' column not found in annotation DataFrame!")
+        logging.warning("'audiofile' column not found in annotation DataFrame!")
 
     # Standardize location column in annotation DataFrame
-    if 'location' not in ann_df.columns:
-        logging.warning("'location' column not found in annotation DataFrame!")
+    # No mapping needed - locations already use canonical names
+
+    # --- Build canonical location to directory name map for Humpback ---
+    # No longer needed - directories use canonical names directly
 
     for loc in locations:
-        # WAVs are under DataInput_New/{species}/Audio/{loc}
-        src = resolve_audio_folder(f"./DataInput_New/{species}/Audio/{loc}")
+        # Humpback: WAVs in Audio/{location}, annotations in Annotations/{location}
+        # Orca: WAVs and annotations in Audio/{location} and Annotations/{location}
+        if species.lower() == "humpback":
+            src = resolve_audio_folder(f"./DataInput_New/{species}/Audio/{loc}")
+        elif species.lower() == "orca":
+            src = resolve_audio_folder(f"./DataInput_New/{species}/Audio/{loc}")
+        else:
+            src = resolve_audio_folder(f"./DataInput_New/{species}/Audio/{loc}")
         dst = f"./DataInput_New/{species}/Processed/SpectrogramsOverlap{int(overlap*1000)}ms/{loc}"
 
         # Only process WAVs referenced in ann_df for this location
@@ -318,7 +338,7 @@ def generate_spectrograms_and_labels(
             all_out.extend(out)
 
         # Write label CSV for this location
-        df = pd.DataFrame(all_out, columns=['filename', 'label', 'audiofile', 'annotationfile', 'overlap_ms', 'overlap_pct', 'annotation_start', 'annotation_end'])
+        df = pd.DataFrame(all_out, columns=['filename', 'label', 'audiofile', 'annotationfile', 'overlap_seconds', 'overlap_fraction', 'annotation_start', 'annotation_end'])
         df['location'] = loc
         df['fullpath'] = df['filename'].apply(lambda fn: os.path.join(dst, fn))
         df['species'] = species.lower()
@@ -365,7 +385,7 @@ if __name__ == "__main__":
     # # adjust species & overlap_ms as needed
     # species    = "Humpback"
     # overlap_ms = 400
-    # base       = f"./DataInput/{species}"
+    # base       = f"./DataInput_New/{species}"
     # pattern    = f"{base}/*_{species.lower()}_overlap{overlap_ms}ms_spectrogram_labels.csv"
 
     # all_df = pd.concat([pd.read_csv(f) for f in glob.glob(pattern)], ignore_index=True)

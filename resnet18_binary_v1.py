@@ -104,9 +104,9 @@ class Config:
     
     # File Paths
     LABEL_FILES = [
-        '/home/radodhia/ssdprivate/NOAAWhalesV2/DataInput_New/Beluga/Processed/LabelsOverlap400ms/Beluga_labels.csv',
-        # '/home/radodhia/ssdprivate/NOAAWhalesV2/DataInput_New/Humpback/Processed/LabelsOverlap400ms/Humpback_labels.csv',
-        # '/home/radodhia/ssdprivate/NOAAWhalesV2/DataInput_New/Orca/Processed/LabelsOverlap400ms/Orca_labels.csv'
+    '/home/radodhia/ssdprivate/NOAAWhalesV3/DataInput_New/Beluga/Processed/LabelsOverlap400ms/Beluga_labels.csv',
+    # '/home/radodhia/ssdprivate/NOAAWhalesV3/DataInput_New/Humpback/Processed/LabelsOverlap400ms/Humpback_labels.csv',
+    # '/home/radodhia/ssdprivate/NOAAWhalesV3/DataInput_New/Orca/Processed/LabelsOverlap400ms/Orca_labels.csv'
     ]
     
     # Train/Validation/Test Split Configuration
@@ -121,12 +121,12 @@ class Config:
     VAL_SPLIT_FROM_TRAIN = 0.2
     
     # Output Directories
-    RESULTS_DIR = '/home/radodhia/ssdprivate/NOAAWhalesV2/TestResults'
+    RESULTS_DIR = '/home/radodhia/ssdprivate/NOAAWhalesV3/TestResults'
     MODELS_DIR = 'BestModels'
     LOGS_DIR = 'Logs/Resnet18Binary'
     LIGHTNING_LOGS_DIR = 'lightning_logs'
-    COMBINED_DATA_DIR = '/home/radodhia/ssdprivate/NOAAWhalesV2/DataInput_New/Combined'
-    ASSIGNATIONS_DIR = '/home/radodhia/ssdprivate/NOAAWhalesV2/Assignations'
+    COMBINED_DATA_DIR = '/home/radodhia/ssdprivate/NOAAWhalesV3/DataInput_New/Combined'
+    ASSIGNATIONS_DIR = '/home/radodhia/ssdprivate/NOAAWhalesV3/Assignations'
     
     @classmethod
     def validate(cls):

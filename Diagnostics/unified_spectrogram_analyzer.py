@@ -28,7 +28,7 @@ import torchaudio
 
 def find_audio_file_by_name(audiofile_name):
     """Find the full path to the audio file based on partial name."""
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # Go up to NOAAWhalesV2
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # Go up to NOAAWhalesV3
     
     # Add .wav extension if not present
     if not audiofile_name.endswith('.wav'):
