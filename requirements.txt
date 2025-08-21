@@ -11,3 +11,5 @@ scikit-learn
 Pillow
 tqdm
 tensorboard
+torchcodec
+soundfile
