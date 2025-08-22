@@ -53,14 +53,15 @@ MIN_OVERLAP_FOR_POSITIVE = 0.3
 N_FFT     = 2048       # FFT window size
 HOP_LEN   = 512        # hop length
 N_MELS    = 128        # number of mel bands
+SPEC_TYPE = "mel"     # Options: "mel" or "stft"
 
 # ─── LOGGING ───────────────────────────────────────────────────────────────
 os.makedirs('Logs', exist_ok=True)
-today = datetime.datetime.now(pytz.UTC).strftime('%Y-%m-%d')
-run_no= len(glob.glob(f"Logs/make_s_and_l_humpback_orca_{today}_*.log")) + 1
+todaynow = datetime.datetime.now(pytz.UTC).strftime('%Y-%m-%d')
+run_no= len(glob.glob(f"Logs/MakeSpectrograms/humpback_orca_{todaynow}_*.log")) + 1
 local_time = datetime.datetime.now().strftime('%H%M%S')
 logging.basicConfig(
-    filename=f"Logs/make_s_and_l_humpback_orca_{today}_{local_time}.log",
+    filename=f"Logs/MakeSpectrograms/humpback_orca_{today}_{local_time}.log",
     level=logging.INFO,
     format='%(asctime)s %(message)s',
     force=True
@@ -157,19 +158,33 @@ def process_wav_file(
                 return any(max(0, min(b, t1) - max(a, t0)) >= min_overlap for a, b in intervals)
 
             try:
-                # --- Compute spectrogram once ---
-                mel_transform = MelSpectrogram(
-                    sample_rate=sr,
-                    n_fft=N_FFT,
-                    hop_length=HOP_LEN,
-                    n_mels=N_MELS,
-                    win_length=N_FFT,
-                    power=2.0,
-                    normalized=False
-                ).to(device=device, dtype=dtype)
-                mel_spec = mel_transform(wave)
-                db = 10 * torch.log10(mel_spec + 1e-6)
-                db = torch.clamp(db, min=-80, max=0).cpu()
+                    # --- Compute spectrogram once ---
+                    if SPEC_TYPE == "mel":
+                        from torchaudio.transforms import MelSpectrogram
+                        transform = MelSpectrogram(
+                            sample_rate=sr,
+                            n_fft=N_FFT,
+                            hop_length=HOP_LEN,
+                            n_mels=N_MELS,
+                            win_length=N_FFT,
+                            power=2.0,
+                            normalized=False
+                        ).to(device=device, dtype=dtype)
+                        spec = transform(wave)
+                    elif SPEC_TYPE == "stft":
+                        from torchaudio.transforms import Spectrogram
+                        transform = Spectrogram(
+                            n_fft=N_FFT,
+                            hop_length=HOP_LEN,
+                            win_length=N_FFT,
+                            power=2.0,
+                            normalized=False
+                        ).to(device=device, dtype=dtype)
+                        spec = transform(wave)
+                    else:
+                        raise ValueError(f"Unknown SPEC_TYPE: {SPEC_TYPE}")
+                    db = 10 * torch.log10(spec + 1e-6)
+                    db = torch.clamp(db, min=-80, max=0).cpu()
             except Exception as e:
                 logging.error(f"MEL failed for {audiofile} chunk {chunk_index} ({chunk_start_s:.2f}s): {e}")
                 return

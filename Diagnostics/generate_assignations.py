@@ -5,14 +5,14 @@ This script analyzes the distribution of whale call labels across different spec
 then recommends how to split the data into train/validation/test sets.
 
 What it does:
-1. Reads label CSV files from each species directory in the DataInput folder
+1. Reads label CSV files from each species directory in the DataInput_New folder
 2. Combines all labels and analyzes the distribution by species and location
 3. Creates visualizations showing label distributions (percentages and counts)
 4. Recommends optimal data splits (train/validation/test) to ensure each split has
    a minimum number of positive samples for each species
 
 Parameters to configure:
-- base_dir: The base directory containing species folders (default: "DataInput")
+- base_dir: The base directory containing species folders (default: "DataInput_New")
 - MIN_POS: Minimum number of positive samples per species per split (default: 1000)
   Adjust this value based on your dataset size and training requirements
 - species: Specify which species to include in the analysis
@@ -265,11 +265,28 @@ def main():
             if sums[s] < MIN_POS:
                 log_and_print(f"  WARNING: {split} has only {sums[s]} positives for {s} (less than {MIN_POS})")
 
-    # Print summary table: positive samples per species per split
+    # Print summary table: positive, negative, and proportion of positive samples per species per split
+    neg_counts = {}
+    pos_props = {}
+    for split, locs in splits.items():
+        split_df = all_labels[all_labels['location'].isin(locs)]
+        neg_counts[split] = {}
+        pos_props[split] = {}
+        for s in species:
+            n_pos = split_df[(split_df['species'] == s) & (split_df['label'] == 1)].shape[0]
+            n_neg = split_df[(split_df['species'] == s) & (split_df['label'] == 0)].shape[0]
+            total = n_pos + n_neg
+            neg_counts[split][s] = n_neg
+            pos_props[split][s] = round(n_pos / total, 3) if total > 0 else 0.0
     summary = pd.DataFrame({split: [split_counts[split][s] for s in species] for split in splits}).T
-    summary.columns = species
-    log_and_print("\nSummary: Positive samples per species per split (stage):")
-    log_and_print(str(summary))
+    # Combine pos, neg, and prop columns into one table
+    combined = pd.DataFrame(index=splits.keys())
+    for s in species:
+        combined[f"{s} (pos)"] = [split_counts[split][s] for split in splits]
+        combined[f"{s} (neg)"] = [neg_counts[split][s] for split in splits]
+        combined[f"{s} (pos_prop)"] = [pos_props[split][s] for split in splits]
+    log_and_print("\nSummary: Samples per species per split (stage):")
+    log_and_print(str(combined))
 
     # Optionally, you can adjust the splits above to better balance or to meet your own criteria.
     # You can now use these splits to assign locations in your main pipeline.

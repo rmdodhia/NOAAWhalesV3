@@ -20,7 +20,9 @@ import datetime
 import pytz
 import csv
 import random
+import traceback
 from collections import Counter
+import math
 
 # Third-party imports
 import pandas as pd
@@ -54,15 +56,15 @@ class Config:
     """Configuration class for easy parameter management with validation"""
     
     # Data Parameters
-    DATA_USE_PROPORTION = 1.0  # Proportion of data to use (for faster testing)
+    DATA_USE_PROPORTION = 1.0  # Proportion of data to use
     
     # Model Parameters
     NUM_CLASSES = 2  # Binary classification
     
     # Model Training Parameters
     NUM_EPOCHS = 30
-    BATCH_SIZE = 128  # Increased for better GPU utilization and gradient stability
-    LEARNING_RATE = 0.0003  # Increased to match larger batch size
+    BATCH_SIZE = 64  # Use 128 for better GPU utilization and gradient stability
+    LEARNING_RATE = 0.0002  # Increased to match larger batch size
     WEIGHT_DECAY = 0.01  # L2 regularization to prevent overfitting
     DROPOUT_RATE = 0.3   # Dropout for regularization
     GRADIENT_CLIP_VAL = 1.0  # Gradient clipping to prevent exploding gradients
@@ -70,7 +72,7 @@ class Config:
     # Loss Function Settings
     USE_FOCAL_LOSS = True
     FOCAL_LOSS_ALPHA = 0.75  # Weight for positive class in Focal Loss
-    FOCAL_LOSS_GAMMA = 3   # Focusing parameter for Focal Loss
+    FOCAL_LOSS_GAMMA = 2   # Focusing parameter for Focal Loss
     USE_LABEL_SMOOTHING = True  # Enable label smoothing for better calibration
     LABEL_SMOOTHING = 0.1  # Label smoothing factor (0.0 = no smoothing, 0.1 = 10% smoothing)
     
@@ -101,19 +103,23 @@ class Config:
     AUG_NOISE_STD = 0.02            # Noise standard deviation
     AUG_BUFFER_PROB = 0.05          # Simulate recording artifacts
     AUG_BUFFER_MAX_RATIO = 0.1      # Buffer corruption ratio
+
+    # Undersampling configuration
+    UNDERSAMPLE_NEG = True  # Set True to enable undersampling
+    POSITIVE_RATIO = 0.4     # Desired ratio of positive samples (label=1) in training set (0.0-1.0)
     
     # File Paths
     LABEL_FILES = [
-    '/home/radodhia/ssdprivate/NOAAWhalesV3/DataInput_New/Beluga/Processed/LabelsOverlap400ms/Beluga_labels.csv',
-    # '/home/radodhia/ssdprivate/NOAAWhalesV3/DataInput_New/Humpback/Processed/LabelsOverlap400ms/Humpback_labels.csv',
+    # '/home/radodhia/ssdprivate/NOAAWhalesV3/DataInput_New/Beluga/Processed/LabelsOverlap400ms/Beluga_labels.csv',
+    '/home/radodhia/ssdprivate/NOAAWhalesV3/DataInput_New/Humpback/Processed/LabelsOverlap400ms/Humpback_labels.csv',
     # '/home/radodhia/ssdprivate/NOAAWhalesV3/DataInput_New/Orca/Processed/LabelsOverlap400ms/Orca_labels.csv'
     ]
     
     # Train/Validation/Test Split Configuration
     EXPERIMENT_RUNS = [
         {
-            'test':  ['216D', '223D', '214D'],
-            'val': ['206D', '201D', '213D']
+            'test':  ['Chinitna'],
+            'val': ['Iniskin']
         }
     ]
     
@@ -220,7 +226,6 @@ def load_and_prepare_data():
     # Read all CSV files efficiently
     dfs = [pd.read_csv(label_file) for label_file in Config.LABEL_FILES]
     labelsdf = pd.concat(dfs, ignore_index=True)
-
     # Vectorized binary label assignment
     whale_species = ['humpback', 'orca', 'beluga']
     labelsdf['binarylabel'] = (
@@ -259,6 +264,34 @@ def get_metadata_for_paths(paths, labelsdf):
         species.append(metadata['species'])
         locations.append(metadata['location'])
     return species, locations
+
+def get_extended_metadata_for_paths(paths, labelsdf):
+    """
+    Return species, location, audiofile, annotationfile lists for the given spectrogram paths.
+    Missing fields default to empty strings.
+    """
+    # Build an index on fullpath with optional columns if present
+    cols = ['species', 'location']
+    if 'audiofile' in labelsdf.columns:
+        cols.append('audiofile')
+    if 'annotationfile' in labelsdf.columns:
+        cols.append('annotationfile')
+    idx = labelsdf.set_index('fullpath')[cols]
+
+    species, locations, audiofiles, annotationfiles = [], [], [], []
+    for p in paths:
+        if p in idx.index:
+            row = idx.loc[p]
+            species.append(row['species'] if 'species' in row else '')
+            locations.append(row['location'] if 'location' in row else '')
+            audiofiles.append(row['audiofile'] if 'audiofile' in row else '')
+            annotationfiles.append(row['annotationfile'] if 'annotationfile' in row else '')
+        else:
+            species.append('')
+            locations.append('')
+            audiofiles.append('')
+            annotationfiles.append('')
+    return species, locations, audiofiles, annotationfiles
 
 def prepare_location_data(labelsdf, locations, data_use_proportion):
     """
@@ -359,8 +392,29 @@ def save_assignment_data(train_image_paths, train_labels, train_species, train_l
 def create_data_loaders(train_image_paths, train_labels, train_species, train_locations_list,
                        val_image_paths, val_labels, val_species, val_locations_list,
                        test_image_paths, test_labels, test_species, test_locations_list,
-                       train_transform, val_transform, test_transform):
+                       train_transform, val_transform, test_transform,
+                       test_audiofiles=None, test_annotationfiles=None):
     """Create training, validation, and test data loaders"""
+    
+    # --- Undersample majority class if enabled ---
+    if Config.UNDERSAMPLE_NEG:
+        pos_indices = [i for i, lbl in enumerate(train_labels) if lbl == 1]
+        neg_indices = [i for i, lbl in enumerate(train_labels) if lbl == 0]
+        n_pos = len(pos_indices)
+        n_neg = len(neg_indices)
+        desired_neg = int(n_pos * (1 - Config.POSITIVE_RATIO) / Config.POSITIVE_RATIO)
+        if desired_neg < n_neg:
+            np.random.seed(42)
+            selected_neg = np.random.choice(neg_indices, desired_neg, replace=False)
+            selected_indices = pos_indices + list(selected_neg)
+            np.random.shuffle(selected_indices)
+            train_image_paths = [train_image_paths[i] for i in selected_indices]
+            train_labels = [train_labels[i] for i in selected_indices]
+            train_species = [train_species[i] for i in selected_indices]
+            train_locations_list = [train_locations_list[i] for i in selected_indices]
+            logging.info(f"Undersampled negatives: {n_neg} -> {desired_neg}. Final train set: {len(train_labels)} samples. Pos ratio: {Config.POSITIVE_RATIO}")
+        else:
+            logging.info(f"Not enough negatives to undersample to desired ratio. Keeping all negatives.")
     
     # Create datasets
     train_dataset = SpectrogramDataset(train_image_paths, train_labels, 
@@ -424,7 +478,8 @@ def create_data_loaders(train_image_paths, train_labels, train_species, train_lo
     # Create test loader
     test_dataset = SpectrogramDataset(test_image_paths, test_labels, transform=test_transform, 
                                     is_training=False, species=test_species, 
-                                    locations=test_locations_list)
+                                    locations=test_locations_list,
+                                    audiofiles=test_audiofiles, annotationfiles=test_annotationfiles)
     test_loader = DataLoader(
         test_dataset, 
         shuffle=False,
@@ -478,7 +533,7 @@ def setup_training_components(test_location_str, val_location_str, test_image_pa
     # Alternative: Use strategy='auto' for single GPU training if you prefer simpler logging
     trainer = pl.Trainer(
         max_epochs=Config.NUM_EPOCHS,
-        devices='auto',
+        devices=1,
         num_nodes=1,
         accelerator='gpu',
         strategy='ddp',  # Multi-GPU training - logging handled by rank 0 only
@@ -486,7 +541,7 @@ def setup_training_components(test_location_str, val_location_str, test_image_pa
         logger=tb_logger,
         enable_progress_bar=True,
         gradient_clip_val=Config.GRADIENT_CLIP_VAL,  # Gradient clipping
-        callbacks=[checkpoint_callback, early_stop_callback, LoggingCallback()]
+        callbacks=[checkpoint_callback, LoggingCallback()]
     )
     
     return model, trainer, checkpoint_callback
@@ -677,13 +732,15 @@ class SpectrogramAugmentations:
         return spec
 
 class SpectrogramDataset(Dataset):
-    def __init__(self, image_paths, labels, transform=None, is_training=False, species=None, locations=None):
+    def __init__(self, image_paths, labels, transform=None, is_training=False, species=None, locations=None, audiofiles=None, annotationfiles=None):
         self.image_paths = image_paths
         self.labels = labels
         self.transform = transform
         self.is_training = is_training
         self.species = species if species is not None else [''] * len(image_paths)
         self.locations = locations if locations is not None else [''] * len(image_paths)
+        self.audiofiles = audiofiles if audiofiles is not None else [''] * len(image_paths)
+        self.annotationfiles = annotationfiles if annotationfiles is not None else [''] * len(image_paths)
 
     def __len__(self):
         return len(self.image_paths)
@@ -705,7 +762,12 @@ class SpectrogramDataset(Dataset):
         label = self.labels[idx]
         species = self.species[idx]
         location = self.locations[idx]
-        return spec, label, self.image_paths[idx], species, location
+        audiofile = self.audiofiles[idx] if self.audiofiles else ''
+        annotationfile = self.annotationfiles[idx] if self.annotationfiles else ''
+        if isinstance(annotationfile, float) and math.isnan(annotationfile):
+            annotationfile = ''
+        annotationfile = str(annotationfile)
+        return spec, label, self.image_paths[idx], species, location, audiofile, annotationfile
 
 # ============================================================================
 # MODEL CLASSES  
@@ -770,7 +832,7 @@ class ResNet18BinaryClassifier(pl.LightningModule):
         os.makedirs(Config.RESULTS_DIR, exist_ok=True)
         self.csv_file_path = f'{Config.RESULTS_DIR}/test_results_binary_testlocation_{self.test_location}_vallocation_{self.val_location}.csv'
         with open(self.csv_file_path, 'w', newline='') as file:
-            fieldnames = ['image_filename', 'predicted_label', 'actual_label', 'confidence_percent', 'whale_probability_percent', 'species', 'location']
+            fieldnames = ['image_filename', 'spectrogram_path', 'predicted_label', 'actual_label', 'confidence_percent', 'whale_probability_percent', 'species', 'location', 'audiofile', 'annotation_file_path']
             writer = csv.DictWriter(file, fieldnames=fieldnames)
             writer.writeheader()
 
@@ -804,7 +866,7 @@ class ResNet18BinaryClassifier(pl.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        inputs, labels, image_paths, species, locations = batch
+        inputs, labels, image_paths, species, locations, *_ = batch
         outputs = self(inputs)
         loss = self.criterion(outputs, labels)
         preds = torch.argmax(outputs, dim=1)
@@ -827,7 +889,7 @@ class ResNet18BinaryClassifier(pl.LightningModule):
         return loss
 
     def test_step(self, batch, batch_idx):
-        inputs, labels, image_paths, species, locations = batch
+        inputs, labels, image_paths, species, locations, audiofiles, annotationfiles = batch
         outputs = self(inputs)
         loss = self.criterion(outputs, labels)
         preds = torch.argmax(outputs, dim=1)
@@ -850,15 +912,18 @@ class ResNet18BinaryClassifier(pl.LightningModule):
         for i in range(len(labels)):
             results.append({
                 'image_filename': os.path.basename(image_paths[i]),
+                'spectrogram_path': image_paths[i],
                 'predicted_label': preds[i].item(),
                 'actual_label': labels[i].item(),
                 'confidence_percent': round(confidences[i].item() * 100, 2),
                 'whale_probability_percent': round(whale_probs[i].item() * 100, 2),
                 'species': species[i] if species[i] is not None else '',
-                'location': locations[i] if locations[i] is not None else ''
+                'location': locations[i] if locations[i] is not None else '',
+                'audiofile': audiofiles[i] if audiofiles[i] is not None else '',
+                'annotation_file_path': annotationfiles[i] if annotationfiles[i] is not None else ''
             })
         with open(self.csv_file_path, 'a', newline='') as file:
-            fieldnames = ['image_filename', 'predicted_label', 'actual_label', 'confidence_percent', 'whale_probability_percent', 'species', 'location']
+            fieldnames = ['image_filename', 'spectrogram_path', 'predicted_label', 'actual_label', 'confidence_percent', 'whale_probability_percent', 'species', 'location', 'audiofile', 'annotation_file_path']
             writer = csv.DictWriter(file, fieldnames=fieldnames)
             writer.writerows(results)
         self.log('test_loss', loss, prog_bar=True, logger=True, sync_dist=True, batch_size=inputs.size(0))
@@ -875,10 +940,14 @@ class ResNet18BinaryClassifier(pl.LightningModule):
         for x in self.val_outputs:
             all_species.extend(x['species'])
             all_locations.extend(x['locations'])
-        
         all_preds_np = all_preds.cpu().numpy()
         all_labels_np = all_labels.cpu().numpy()
-        
+        # Print confusion matrix and class counts for diagnostics
+        from sklearn.metrics import confusion_matrix
+        print("Validation Confusion Matrix:")
+        print(confusion_matrix(all_labels_np, all_preds_np))
+        print(f"Validation True label counts: {dict(Counter(all_labels_np))}")
+        print(f"Validation Predicted label counts: {dict(Counter(all_preds_np))}")
         # Overall metrics
         precision = precision_score(all_labels_np, all_preds_np, average='binary', zero_division=0)
         recall = recall_score(all_labels_np, all_preds_np, average='binary', zero_division=0)
@@ -946,23 +1015,32 @@ class ResNet18BinaryClassifier(pl.LightningModule):
             all_species.extend(x['species'])
             all_locations.extend(x['locations'])
         
+        # Convert to numpy for sklearn metrics to avoid dtype surprises
+        all_preds_np = all_preds.cpu().numpy()
+        all_labels_np = all_labels.cpu().numpy()
+
         # Overall metrics
-        precision = precision_score(all_labels.cpu(), all_preds.cpu(), average='binary', zero_division=0)
-        recall = recall_score(all_labels.cpu(), all_preds.cpu(), average='binary', zero_division=0)
-        f1 = f1_score(all_labels.cpu(), all_preds.cpu(), average='binary', zero_division=0)
+        precision = precision_score(all_labels_np, all_preds_np, average='binary', zero_division=0)
+        recall = recall_score(all_labels_np, all_preds_np, average='binary', zero_division=0)
+        f1 = f1_score(all_labels_np, all_preds_np, average='binary', zero_division=0)
         try:
-            auc = roc_auc_score(all_labels.cpu(), all_preds.cpu())
+            auc = roc_auc_score(all_labels_np, all_preds_np)
         except ValueError:
             auc = float('nan')
         test_acc = (all_preds == all_labels).float().mean().item()
         
-        self.log('test_precision', round(precision, 3), sync_dist=True, batch_size=len(all_preds))
-        self.log('test_recall', round(recall, 3), sync_dist=True, batch_size=len(all_preds))
-        self.log('test_f1', round(f1, 3), sync_dist=True, batch_size=len(all_preds))
-        self.log('test_auc', round(auc, 3), sync_dist=True, batch_size=len(all_preds))
-        self.log('test_accuracy', round(test_acc, 3), sync_dist=True, batch_size=len(all_preds))
+        # Ensure pure python floats for logging
+        self.log('test_precision', float(round(precision, 3)), sync_dist=True, batch_size=len(all_preds))
+        self.log('test_recall', float(round(recall, 3)), sync_dist=True, batch_size=len(all_preds))
+        self.log('test_f1', float(round(f1, 3)), sync_dist=True, batch_size=len(all_preds))
+        self.log('test_auc', float(round(auc, 3)) if not np.isnan(auc) else float('nan'), sync_dist=True, batch_size=len(all_preds))
+        self.log('test_accuracy', float(round(test_acc, 3)), sync_dist=True, batch_size=len(all_preds))
         
-        test_message = f'Test Metrics - Location: {self.test_location}, Val Location: {self.val_location}, Overall Acc: {test_acc:.3f}, Precision: {precision:.3f}, Recall: {recall:.3f}, F1: {f1:.3f}, AUC: {auc:.3f}'
+        test_message = (
+            f'Test Metrics - Location: {self.test_location}, Val Location: {self.val_location}, '
+            f'Overall Acc: {float(test_acc):.3f}, Precision: {float(precision):.3f}, '
+            f'Recall: {float(recall):.3f}, F1: {float(f1):.3f}, AUC: {float(auc):.3f}'
+        )
         print(test_message)
         logging.info(test_message)
         
@@ -977,8 +1055,8 @@ class ResNet18BinaryClassifier(pl.LightningModule):
             if not np.any(species_mask):
                 continue
                 
-            species_preds = all_preds.cpu().numpy()[species_mask]
-            species_labels = all_labels.cpu().numpy()[species_mask]
+            species_preds = all_preds_np[species_mask]
+            species_labels = all_labels_np[species_mask]
             
             species_acc = np.mean(species_preds == species_labels)
             species_precision = precision_score(species_labels, species_preds, average='binary', zero_division=0)
@@ -990,11 +1068,11 @@ class ResNet18BinaryClassifier(pl.LightningModule):
                 species_auc = float('nan')
             
             # Log per-species metrics
-            self.log(f'test_acc_{species}', round(species_acc, 3), sync_dist=True)
-            self.log(f'test_precision_{species}', round(species_precision, 3), sync_dist=True)
-            self.log(f'test_recall_{species}', round(species_recall, 3), sync_dist=True)
-            self.log(f'test_f1_{species}', round(species_f1, 3), sync_dist=True)
-            self.log(f'test_auc_{species}', round(species_auc, 3), sync_dist=True)
+            self.log(f'test_acc_{species}', float(round(species_acc, 3)), sync_dist=True)
+            self.log(f'test_precision_{species}', float(round(species_precision, 3)), sync_dist=True)
+            self.log(f'test_recall_{species}', float(round(species_recall, 3)), sync_dist=True)
+            self.log(f'test_f1_{species}', float(round(species_f1, 3)), sync_dist=True)
+            self.log(f'test_auc_{species}', float(round(species_auc, 3)) if not np.isnan(species_auc) else float('nan'), sync_dist=True)
             
             test_species_message = f'Test {species} (n={len(species_preds)}) - Acc: {species_acc:.3f}, Precision: {species_precision:.3f}, Recall: {species_recall:.3f}, F1: {species_f1:.3f}, AUC: {species_auc:.3f}'
             print(test_species_message)
@@ -1008,12 +1086,12 @@ class ResNet18BinaryClassifier(pl.LightningModule):
         )
         
         # Add learning rate scheduler to reduce LR when val_loss plateaus
+        # Some older PyTorch versions don't support the 'verbose' kwarg; omit for compatibility
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, 
+            optimizer,
             mode='min',
             factor=Config.LR_SCHEDULER_FACTOR,
             patience=Config.LR_SCHEDULER_PATIENCE,
-            verbose=True,
             min_lr=Config.LR_SCHEDULER_MIN_LR
         )
         
@@ -1183,12 +1261,17 @@ def main():
                     test_location_str, val_location_str
                 )
                 
+                # Gather extended metadata for test set
+                test_species_ext, test_locations_ext, test_audiofiles, test_annotationfiles = get_extended_metadata_for_paths(
+                    test_image_paths, labelsdf)
+
                 # Create data loaders
                 train_loader, val_loader, test_loader, class_weights_tensor = create_data_loaders(
                     train_image_paths, train_labels, train_species, train_locations_list,
                     val_image_paths, val_labels, val_species, val_locations_list,
                     test_image_paths, test_labels, test_species, test_locations_list,
-                    train_transform, val_transform, test_transform
+                    train_transform, val_transform, test_transform,
+                    test_audiofiles=test_audiofiles, test_annotationfiles=test_annotationfiles
                 )
                 
                 # Setup training components
@@ -1234,6 +1317,7 @@ def main():
                 experiment_result['error'] = str(e)
                 
                 logging.error(f'❌ Experiment {exp_idx} failed after {experiment_result["total_time"]}: {str(e)}')
+                logging.error('Traceback for failure during experiment run:\n' + traceback.format_exc())
                 logging.error(f'Continuing with next experiment run...')
             
             experiment_results.append(experiment_result)

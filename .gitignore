@@ -2,3 +2,30 @@ DataInput/
 Logs/
 lightning_logs/
 BestModels/
+
+# Environments, editor, caches
+.venv/
+__pycache__/
+.pytest_cache/
+.vscode/
+
+# DataInput_New rules
+# 1) Track Annotations fully (no ignore here)
+# 2) Audio: ignore all file contents but keep the location folders via marker files
+DataInput_New/*/Audio/**
+!DataInput_New/*/Audio/**/.gitignore
+!DataInput_New/*/Audio/**/.gitkeep
+# 3) Processed: don't track anything
+DataInput_New/*/Processed/**
+# 4) Metadata: don't track anything
+DataInput_New/*/Metadata/**
+# Combined (generated aggregates) should not be tracked
+DataInput_New/Combined/**
+
+# 5 & 6) Diagnostics: track only top-level .py files; ignore subfolders and other files
+Diagnostics/*
+!Diagnostics/*.py
+
+# 7) Results and other generated artifacts
+TestResults/**
+Assignations/**
